@@ -1,0 +1,11 @@
+{
+  "short_name": "LastManStanding",
+  "name": "Last Man Standing - Premier League",
+  "icons": [],
+  "start_url": ".",
+  "display": "standalone",
+  "orientation": "portrait",
+  "theme_color": "#05061a",
+  "background_color": "#05061a",
+  "description": "Premier League Last Man Standing survivor pool — pick a winner every round, last person standing takes the pot."
+}
