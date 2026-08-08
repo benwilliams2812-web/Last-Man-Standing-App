@@ -2,7 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   collection, doc, addDoc, setDoc,
-  onSnapshot, query, orderBy, serverTimestamp, writeBatch
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch, getDoc, getDocs
 } from "firebase/firestore";
 import { db } from "./firebase";
 
@@ -151,6 +151,22 @@ function StandingsTab({ competition, players, members }) {
   const eliminated = activePlayers.filter(p => !p.alive);
   const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
 
+  if (competition.status === "completed") {
+    return (
+      <div className="fade-in empty">
+        <div className="ei">🏆</div>
+        <div className="et">{competition.name} — Complete</div>
+        <div className="es">
+          {competition.winner
+            ? `${nameFor(competition.winner)} won the pot!`
+            : competition.splitWinners
+              ? `£${competition.splitAmount || 0} split between ${competition.splitWinners.map(nameFor).join(", ")}`
+              : "This competition has ended."}
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="fade-in">
       <div className="ss">
@@ -270,8 +286,43 @@ function fmtDeadline(iso) {
   return new Date(iso).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
 }
 
+// Reverses a settled round: pure Firestore reads/writes, no external API,
+// so this runs client-side rather than through a serverless function.
+// Restores every player this round eliminated back to alive, removes their
+// team from teamsUsed, resets pick outcomes to pending, clears fixture
+// results, and un-declares any winner/rollover-split prompt this round
+// triggered — matching design doc Section 2.4 exactly.
+async function undoRound(competitionId, round) {
+  const picksSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/picks`));
+  const batch = writeBatch(db);
+
+  for (const pickDoc of picksSnap.docs) {
+    const pick = pickDoc.data();
+    if (pick.outcome === "pending") continue;
+
+    batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/picks/${pickDoc.id}`), { outcome: "pending" }, { merge: true });
+
+    const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
+    const playerSnap = await getDoc(playerRef);
+    const player = playerSnap.data() || {};
+    const teamsUsed = (player.teamsUsed || []).filter(t => t !== pick.team);
+    batch.set(playerRef, { teamsUsed, alive: true }, { merge: true });
+  }
+
+  const fixturesSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`));
+  fixturesSnap.docs.forEach(f => batch.set(f.ref, { result: null, homeScore: null, awayScore: null }, { merge: true }));
+
+  batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}`), { status: "closed", settledAt: null }, { merge: true });
+  batch.set(doc(db, `competitions/${competitionId}`), {
+    status: "active", winner: null, needsResolution: false, resolutionReason: null, resolutionCandidates: [],
+  }, { merge: true });
+
+  await batch.commit();
+}
+
 function RoundsCard({ competition, rounds, showToast }) {
   const [importing, setImporting] = useState(false);
+  const [settlingId, setSettlingId] = useState(null);
   if (!competition) return null;
 
   const nextMatchday = (rounds[rounds.length - 1]?.matchday || 0) + 1;
@@ -299,6 +350,29 @@ function RoundsCard({ competition, rounds, showToast }) {
     showToast(`Round ${round.roundNumber} ${status}`);
   };
 
+  const settleRound = async (round) => {
+    setSettlingId(round.id);
+    try {
+      const res = await fetch("/api/settle-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ competitionId: competition.id, roundId: round.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Settle failed");
+      showToast(data.message);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setSettlingId(null);
+    }
+  };
+
+  const handleUndo = async (round) => {
+    await undoRound(competition.id, round);
+    showToast(`Round ${round.roundNumber} undone`);
+  };
+
   return (
     <div className="card">
       <div className="ch">Rounds — {competition.name}</div>
@@ -316,12 +390,19 @@ function RoundsCard({ competition, rounds, showToast }) {
               </div>
             </div>
             <div style={{ display: "flex", gap: 6 }}>
-              {r.status !== "open" && r.status !== "closed" &&
+              {r.status !== "open" && r.status !== "closed" && r.status !== "settled" &&
                 <button className="btn btn-sm btn-g" onClick={() => setStatus(r, "open")}>Open</button>}
               {r.status === "open" &&
                 <button className="btn btn-sm btn-d" onClick={() => setStatus(r, "closed")}>Close</button>}
               {r.status === "closed" &&
-                <span className="badge b-player">closed</span>}
+                <button className="btn btn-sm btn-g" disabled={settlingId === r.id} onClick={() => settleRound(r)}>
+                  {settlingId === r.id ? "Settling…" : "Settle Results"}
+                </button>}
+              {r.status === "settled" &&
+                <>
+                  <span className="badge b-admin">settled</span>
+                  <button className="btn btn-sm btn-d" onClick={() => handleUndo(r)}>Undo</button>
+                </>}
             </div>
           </div>
         ))}
@@ -419,32 +500,98 @@ function PlayersCard({ members, players, activeCompetition, showToast }) {
   );
 }
 
+// Creates a competition and enrolls every existing (non-admin) member as a
+// pending player in it. Shared by "Start a New Competition" and rollover,
+// since a rollover is just this plus carrying the old pot forward.
+async function startCompetition(name, members, startingJackpot = 0) {
+  const compRef = await addDoc(collection(db, "competitions"), {
+    name: name.trim(),
+    status: "active",
+    jackpot: startingJackpot,
+    createdAt: serverTimestamp(),
+  });
+  const batch = writeBatch(db);
+  members.filter(m => m.role !== "admin").forEach(m => {
+    batch.set(doc(db, `competitions/${compRef.id}/players/${m.id}`), {
+      paid: false, active: false, suspended: false, alive: true, teamsUsed: [],
+    });
+  });
+  await batch.commit();
+  return compRef.id;
+}
+
+// ─── RESOLUTION CARD (Admin) ────────────────────────────────────────
+// Shown when a round settlement has left the competition without a clean
+// single winner: either everyone left standing was eliminated together, or
+// the season ran out of fixtures with multiple players still alive.
+function ResolutionCard({ competition, members, players, showToast }) {
+  const [busy, setBusy] = useState(false);
+  if (!competition?.needsResolution) return null;
+
+  const activePlayers = players.filter(p => p.active && !p.suspended);
+  const pot = (competition.jackpot || 0) + activePlayers.length * ENTRY_FEE;
+  const candidateNames = (competition.resolutionCandidates || [])
+    .map(id => members.find(m => m.id === id)?.name || "Unknown")
+    .join(", ");
+  const reasonText = competition.resolutionReason === "all-eliminated"
+    ? "Everyone left standing was eliminated in the same round."
+    : "The season ran out of fixtures with more than one player still alive.";
+
+  const rollOver = async () => {
+    setBusy(true);
+    try {
+      await setDoc(doc(db, `competitions/${competition.id}`), { status: "completed", needsResolution: false }, { merge: true });
+      const newName = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+      await startCompetition(newName, members, pot);
+      showToast(`Rolled over — £${pot} carries into "${newName}"`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const splitPot = async () => {
+    setBusy(true);
+    try {
+      await setDoc(doc(db, `competitions/${competition.id}`), {
+        status: "completed", needsResolution: false,
+        splitWinners: competition.resolutionCandidates || [], splitAmount: pot,
+      }, { merge: true });
+      showToast(`£${pot} split between ${candidateNames}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ borderColor: "rgba(253,224,0,.4)", background: "rgba(253,224,0,.06)" }}>
+      <div className="ch">⚠️ Competition Needs Resolving</div>
+      <div className="es" style={{ color: "var(--chalk)", marginBottom: 6 }}>{reasonText}</div>
+      <div className="es" style={{ color: "var(--mist)", marginBottom: 14 }}>
+        Candidates: <strong style={{ color: "var(--chalk)" }}>{candidateNames || "none"}</strong> · Pot: <strong style={{ color: "var(--chalk)" }}>£{pot}</strong>
+      </div>
+      <div style={{ display: "flex", gap: 8 }}>
+        <button className="btn btn-g" style={{ flex: 1 }} disabled={busy} onClick={rollOver}>Roll Over</button>
+        <button className="btn btn-d" style={{ flex: 1 }} disabled={busy} onClick={splitPot}>Split Pot</button>
+      </div>
+    </div>
+  );
+}
+
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
 function AdminTab({ members, competitions, activeCompetition, rounds, players, showToast }) {
   const [name, setName] = useState("");
 
   const createCompetition = async () => {
     if (!name.trim()) { showToast("Give the competition a name"); return; }
-    const compRef = await addDoc(collection(db, "competitions"), {
-      name: name.trim(),
-      status: "active",
-      jackpot: 0,
-      createdAt: serverTimestamp(),
-    });
-    // Every existing (non-admin) member joins the new competition as pending.
-    const batch = writeBatch(db);
-    members.filter(m => m.role !== "admin").forEach(m => {
-      batch.set(doc(db, `competitions/${compRef.id}/players/${m.id}`), {
-        paid: false, active: false, suspended: false, alive: true, teamsUsed: [],
-      });
-    });
-    await batch.commit();
+    await startCompetition(name, members);
     setName("");
     showToast("Competition created");
   };
 
   return (
     <div className="fade-in">
+      <ResolutionCard competition={activeCompetition} members={members} players={players} showToast={showToast} />
+
       <div className="card">
         <div className="ch">Start a New Competition</div>
         <input className="fi" placeholder="e.g. 22nd August 2026" value={name} onChange={e => setName(e.target.value)} />
@@ -585,6 +732,10 @@ export default function App() {
   if (!user) return (<><style>{CSS}</style><LoginScreen members={members} onLogin={setUser} /></>);
 
   const activeCompetition = competitions.find(c => c.status === "active");
+  // Standings falls back to the most recently finished competition (to show
+  // a winner/split banner) when there's no active one — e.g. right after a
+  // clean winner is declared, before the Admin starts anything new.
+  const displayCompetition = activeCompetition || competitions[0] || null;
   const openRound = rounds.find(r => r.id === openRoundId) || null;
   const myPlayer = players.find(p => p.id === user.id) || null;
   const myPick = picks.find(p => p.id === user.id) || null;
@@ -608,7 +759,7 @@ export default function App() {
           </div>
         </div>
         <div className="content">
-          {tab === "standings" && <StandingsTab competition={activeCompetition} players={players} members={members} />}
+          {tab === "standings" && <StandingsTab competition={displayCompetition} players={players} members={members} />}
           {tab === "pick" && <PickTab competition={activeCompetition} openRound={openRound} fixtures={fixtures} myPlayer={myPlayer} myPick={myPick} user={user} showToast={showToast} />}
           {tab === "round" && <EmptyState title="This Round's Picks" sub="Visible once submissions close." />}
           {tab === "grid" && <EmptyState title="Full History Grid" sub="Player x round grid, coming soon." />}
