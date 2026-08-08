@@ -1,20 +1,14 @@
 // src/firebase.js
-// ─────────────────────────────────────────────────────────────────
-// STEP 1: Create a Firebase project at https://console.firebase.google.com
-//         → Add a Web App → copy its config here.
-// STEP 2: Enable Firestore (Build → Firestore Database → Create database).
-// ─────────────────────────────────────────────────────────────────
-
 import { initializeApp } from "firebase/app";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
-  apiKey: "REPLACE_ME",
-  authDomain: "REPLACE_ME.firebaseapp.com",
-  projectId: "REPLACE_ME",
-  storageBucket: "REPLACE_ME.firebasestorage.app",
-  messagingSenderId: "REPLACE_ME",
-  appId: "REPLACE_ME"
+  apiKey: "AIzaSyDeXliGWYCWDVwZZPSnkxcr7AVOSnC_rX4",
+  authDomain: "last-man-standing-app-4ddc8.firebaseapp.com",
+  projectId: "last-man-standing-app-4ddc8",
+  storageBucket: "last-man-standing-app-4ddc8.firebasestorage.app",
+  messagingSenderId: "419724139136",
+  appId: "1:419724139136:web:cb9c49b200454f9625a465"
 };
 
 const app = initializeApp(firebaseConfig);
