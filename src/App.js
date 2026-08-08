@@ -73,6 +73,9 @@ html,body{height:100%;background:var(--ink);-webkit-tap-highlight-color:transpar
 .b-player{background:rgba(255,255,255,.08);color:var(--mist);}
 .fi{width:100%;background:rgba(255,255,255,.05);border:1px solid rgba(0,60,223,.25);border-radius:9px;padding:12px 14px;color:var(--chalk);font-family:'Outfit',sans-serif;font-size:14px;outline:none;margin-bottom:10px;}
 .fi:focus{border-color:var(--rail);}
+.fisel{appearance:none;background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='7' viewBox='0 0 10 7'%3E%3Cpath fill='%23003cdf' d='M5 7L0 0h10z'/%3E%3C/svg%3E");background-repeat:no-repeat;background-position:right 14px center;}
+.fisel option{background:#0a1050;}
+.fisel option:disabled{color:rgba(138,147,184,.5);}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border:none;border-radius:9px;font-family:'Outfit',sans-serif;font-size:14px;font-weight:600;cursor:pointer;letter-spacing:.2px;}
 .btn-g{background:linear-gradient(135deg,var(--rail) 0%,var(--rail2) 100%);color:#fff;}
 .btn-sm{width:auto;padding:7px 14px;font-size:12px;border-radius:7px;}
@@ -183,13 +186,80 @@ function StandingsTab({ competition, players, members }) {
   );
 }
 
-// ─── PLACEHOLDER TAB ────────────────────────────────────────────────
-function ComingSoon({ title, sub }) {
+// ─── EMPTY STATE ────────────────────────────────────────────────────
+// Reused for "coming soon" placeholders and for real Pick-tab states
+// (not activated / eliminated / no open round etc).
+function EmptyState({ icon = "⚽", title, sub }) {
   return (
     <div className="fade-in empty">
-      <div className="ei">⚽</div>
+      <div className="ei">{icon}</div>
       <div className="et">{title}</div>
       <div className="es">{sub}</div>
+    </div>
+  );
+}
+
+// ─── PICK TAB ───────────────────────────────────────────────────────
+function PickTab({ competition, openRound, fixtures, myPlayer, myPick, user, showToast }) {
+  const [selectedKey, setSelectedKey] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  // Keep the dropdown in sync with the saved pick — otherwise a reload
+  // shows "Current pick: Arsenal" above a dropdown that's reset to blank.
+  useEffect(() => {
+    setSelectedKey(myPick ? `${myPick.fixtureId}:${myPick.team}` : "");
+  }, [myPick?.fixtureId, myPick?.team]);
+
+  if (!competition) return <EmptyState title="No competition running" sub="Ask the Admin to start one." />;
+  if (!myPlayer) return <EmptyState title="Not in this competition" sub="Ask the Admin to add you as a player." />;
+  if (myPlayer.suspended) return <EmptyState icon="⏸️" title="Entry suspended" sub="Contact the Admin to sort this out." />;
+  if (!myPlayer.active) return <EmptyState icon="⏳" title="Not activated yet" sub="You'll be able to pick once the Admin confirms your entry is paid." />;
+  if (!myPlayer.alive) return <EmptyState icon="🚪" title="You're out" sub="You were eliminated this competition — you can still follow Standings and the Grid." />;
+  if (!openRound) return <EmptyState title="No round open" sub="Check back once the Admin opens the next round for picks." />;
+
+  const teamsUsed = new Set(myPlayer.teamsUsed || []);
+  const options = fixtures
+    .flatMap(f => ([
+      { key: `${f.id}:${f.home}`, fixtureId: f.id, team: f.home, disabled: teamsUsed.has(f.home) },
+      { key: `${f.id}:${f.away}`, fixtureId: f.id, team: f.away, disabled: teamsUsed.has(f.away) },
+    ]))
+    .sort((a, b) => a.team.localeCompare(b.team));
+
+  const submit = async () => {
+    const opt = options.find(o => o.key === selectedKey);
+    if (!opt) { showToast("Pick a team first"); return; }
+    setSaving(true);
+    try {
+      await setDoc(doc(db, `competitions/${competition.id}/rounds/${openRound.id}/picks/${user.id}`), {
+        team: opt.team, fixtureId: opt.fixtureId, outcome: "pending", submittedAt: serverTimestamp(),
+      });
+      showToast("Pick submitted");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="fade-in">
+      <div className="card">
+        <div className="ch">Round {openRound.roundNumber} — Make Your Pick</div>
+        {myPick && (
+          <div className="es" style={{ color: "var(--mist)", marginBottom: 12 }}>
+            Current pick: <strong style={{ color: "var(--chalk)" }}>{myPick.team}</strong> — you can change this until the round closes.
+          </div>
+        )}
+        <select className="fi fisel" value={selectedKey} onChange={e => setSelectedKey(e.target.value)}>
+          <option value="">Select a team…</option>
+          {options.map(o => (
+            <option key={o.key} value={o.key} disabled={o.disabled}>
+              {o.team}{o.disabled ? " (already used)" : ""}
+            </option>
+          ))}
+        </select>
+        <button className="btn btn-g" disabled={saving} onClick={submit}>
+          {saving ? "Saving…" : myPick ? "Change Pick" : "Submit Pick"}
+        </button>
+      </div>
     </div>
   );
 }
@@ -440,6 +510,8 @@ export default function App() {
   const [toast, setToast] = useState("");
   const [rounds, setRounds] = useState([]);
   const [players, setPlayers] = useState([]);
+  const [fixtures, setFixtures] = useState([]);
+  const [picks, setPicks] = useState([]);
 
   const showToast = useCallback((msg) => {
     setToast(msg); setTimeout(() => setToast(""), 3200);
@@ -487,10 +559,35 @@ export default function App() {
     return () => u();
   }, [activeCompetitionId]);
 
+  const openRoundId = rounds.find(r => r.status === "open")?.id || null;
+
+  // Fixtures and picks both live under the currently open round, so both
+  // re-subscribe whenever which round is open changes.
+  useEffect(() => {
+    if (!activeCompetitionId || !openRoundId) { setFixtures([]); return; }
+    const u = onSnapshot(
+      collection(db, `competitions/${activeCompetitionId}/rounds/${openRoundId}/fixtures`),
+      s => setFixtures(s.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    return () => u();
+  }, [activeCompetitionId, openRoundId]);
+
+  useEffect(() => {
+    if (!activeCompetitionId || !openRoundId) { setPicks([]); return; }
+    const u = onSnapshot(
+      collection(db, `competitions/${activeCompetitionId}/rounds/${openRoundId}/picks`),
+      s => setPicks(s.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    return () => u();
+  }, [activeCompetitionId, openRoundId]);
+
   if (loading) return (<><style>{CSS}</style><div className="loading"><div className="spin" /><span>Loading…</span></div></>);
   if (!user) return (<><style>{CSS}</style><LoginScreen members={members} onLogin={setUser} /></>);
 
   const activeCompetition = competitions.find(c => c.status === "active");
+  const openRound = rounds.find(r => r.id === openRoundId) || null;
+  const myPlayer = players.find(p => p.id === user.id) || null;
+  const myPick = picks.find(p => p.id === user.id) || null;
 
   const tabs = [
     { id: "standings", label: "Standings" },
@@ -512,9 +609,9 @@ export default function App() {
         </div>
         <div className="content">
           {tab === "standings" && <StandingsTab competition={activeCompetition} players={players} members={members} />}
-          {tab === "pick" && <ComingSoon title="Pick" sub="Team selection is coming next." />}
-          {tab === "round" && <ComingSoon title="This Round's Picks" sub="Visible once submissions close." />}
-          {tab === "grid" && <ComingSoon title="Full History Grid" sub="Player x round grid, coming soon." />}
+          {tab === "pick" && <PickTab competition={activeCompetition} openRound={openRound} fixtures={fixtures} myPlayer={myPlayer} myPick={myPick} user={user} showToast={showToast} />}
+          {tab === "round" && <EmptyState title="This Round's Picks" sub="Visible once submissions close." />}
+          {tab === "grid" && <EmptyState title="Full History Grid" sub="Player x round grid, coming soon." />}
           {tab === "account" && <AccountTab user={user} />}
           {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} players={players} showToast={showToast} />}
         </div>
