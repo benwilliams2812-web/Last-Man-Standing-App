@@ -883,6 +883,68 @@ function ResolutionCard({ competition, members, players, showToast }) {
   );
 }
 
+// ─── SHARE CARD (Admin) ─────────────────────────────────────────────
+// Uses WhatsApp's own click-to-chat link (wa.me/?text=...) rather than any
+// API integration -- there isn't a legitimate way to auto-post into a
+// WhatsApp group (the official Business API only supports 1:1 messages,
+// never groups). This opens WhatsApp with the message pre-filled; the
+// Admin picks the group themselves and hits send. One tap, zero setup,
+// nothing that can get an account banned.
+function buildSuggestedMessage(competition, rounds, players, members) {
+  if (!competition) return "Last Man Standing is starting soon — stay tuned!";
+  const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
+  const activePlayers = players.filter(p => p.active && !p.suspended);
+  const pot = (competition.jackpot || 0) + activePlayers.length * ENTRY_FEE;
+
+  if (competition.status === "completed") {
+    if (competition.winner) return `🏆 ${nameFor(competition.winner)} has won the Last Man Standing pot of £${pot}!`;
+    if (competition.splitWinners) return `The £${competition.splitAmount || pot} pot has been split between ${competition.splitWinners.map(nameFor).join(", ")}.`;
+    return `${competition.name} has ended.`;
+  }
+
+  const openRound = rounds.find(r => r.status === "open");
+  if (openRound) return `⚽ Round ${openRound.roundNumber} is open! Get your Last Man Standing pick in before kickoff.`;
+
+  const lastRound = rounds[rounds.length - 1];
+  if (lastRound?.status === "settled") {
+    const eliminated = activePlayers.filter(p => !p.alive);
+    const alive = activePlayers.filter(p => p.alive);
+    const elimText = eliminated.length ? `${eliminated.map(p => nameFor(p.id)).join(", ")} eliminated.` : "No eliminations this round.";
+    return `Round ${lastRound.roundNumber} results are in. ${elimText} ${alive.length} player${alive.length === 1 ? "" : "s"} remain — pot is now £${pot}.`;
+  }
+  if (lastRound?.status === "closed") return `Round ${lastRound.roundNumber} picks are locked — results coming soon!`;
+
+  return `Last Man Standing — ${competition.name} is underway. Pot currently at £${pot}.`;
+}
+
+function ShareCard({ competition, rounds, players, members }) {
+  const suggested = buildSuggestedMessage(competition, rounds, players, members);
+  const [message, setMessage] = useState(suggested);
+  const [dirty, setDirty] = useState(false);
+
+  useEffect(() => {
+    if (!dirty) setMessage(suggested);
+  }, [suggested, dirty]);
+
+  const shareUrl = `https://wa.me/?text=${encodeURIComponent(message)}`;
+
+  return (
+    <div className="card">
+      <div className="ch">Share Update to WhatsApp</div>
+      <textarea
+        className="fi"
+        rows={4}
+        value={message}
+        onChange={e => { setMessage(e.target.value); setDirty(true); }}
+        style={{ resize: "vertical", fontFamily: "'Outfit',sans-serif", lineHeight: 1.5 }}
+      />
+      <a className="btn btn-g" href={shareUrl} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+        Share to WhatsApp
+      </a>
+    </div>
+  );
+}
+
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
 function AdminTab({ members, competitions, activeCompetition, rounds, players, showToast }) {
   const [name, setName] = useState("");
@@ -905,6 +967,8 @@ function AdminTab({ members, competitions, activeCompetition, rounds, players, s
       </div>
 
       <RoundsCard competition={activeCompetition} rounds={rounds} showToast={showToast} />
+
+      {activeCompetition && <ShareCard competition={activeCompetition} rounds={rounds} players={players} members={members} />}
 
       <PlayersCard members={members} players={players} activeCompetition={activeCompetition} showToast={showToast} />
 
