@@ -73,6 +73,8 @@ html,body{height:100%;background:var(--ink);-webkit-tap-highlight-color:transpar
 .fi:focus{border-color:var(--rail);}
 .btn{display:flex;align-items:center;justify-content:center;gap:8px;width:100%;padding:13px;border:none;border-radius:9px;font-family:'Outfit',sans-serif;font-size:14px;font-weight:600;cursor:pointer;letter-spacing:.2px;}
 .btn-g{background:linear-gradient(135deg,var(--rail) 0%,var(--rail2) 100%);color:#fff;}
+.btn-sm{width:auto;padding:7px 14px;font-size:12px;border-radius:7px;}
+.btn-d{background:rgba(234,2,26,.12);color:var(--lose);border:1px solid rgba(234,2,26,.3);}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
 .empty{text-align:center;padding:36px 20px;color:var(--mist);}
 .ei{font-size:34px;margin-bottom:10px;}
@@ -162,8 +164,73 @@ function ComingSoon({ title, sub }) {
   );
 }
 
+// ─── ROUNDS CARD (Admin) ────────────────────────────────────────────
+function fmtDeadline(iso) {
+  if (!iso) return "";
+  return new Date(iso).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+}
+
+function RoundsCard({ competition, rounds, showToast }) {
+  const [importing, setImporting] = useState(false);
+  if (!competition) return null;
+
+  const nextMatchday = (rounds[rounds.length - 1]?.matchday || 0) + 1;
+
+  const importRound = async () => {
+    setImporting(true);
+    try {
+      const res = await fetch("/api/import-round", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ competitionId: competition.id, matchday: nextMatchday }),
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Import failed");
+      showToast(data.message);
+    } catch (e) {
+      showToast(e.message);
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const setStatus = async (round, status) => {
+    await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
+    showToast(`Round ${round.roundNumber} ${status}`);
+  };
+
+  return (
+    <div className="card">
+      <div className="ch">Rounds — {competition.name}</div>
+      <button className="btn btn-g" disabled={importing} onClick={importRound} style={{ marginBottom: 14 }}>
+        {importing ? "Importing…" : `Import Round ${nextMatchday} Fixtures`}
+      </button>
+      {rounds.length === 0
+        ? <div className="es" style={{ color: "var(--mist)" }}>No rounds yet — import the first one above.</div>
+        : rounds.map(r => (
+          <div key={r.id} className="mem-row">
+            <div className="mem-l">
+              <div>
+                <div className="mem-name">Round {r.roundNumber}</div>
+                <div className="mem-sub">{r.status} · deadline {fmtDeadline(r.deadline)}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 6 }}>
+              {r.status !== "open" && r.status !== "closed" &&
+                <button className="btn btn-sm btn-g" onClick={() => setStatus(r, "open")}>Open</button>}
+              {r.status === "open" &&
+                <button className="btn btn-sm btn-d" onClick={() => setStatus(r, "closed")}>Close</button>}
+              {r.status === "closed" &&
+                <span className="badge b-player">closed</span>}
+            </div>
+          </div>
+        ))}
+    </div>
+  );
+}
+
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
-function AdminTab({ members, competitions, showToast }) {
+function AdminTab({ members, competitions, activeCompetition, rounds, showToast }) {
   const [name, setName] = useState("");
 
   const createCompetition = async () => {
@@ -185,6 +252,8 @@ function AdminTab({ members, competitions, showToast }) {
         <input className="fi" placeholder="e.g. 22nd August 2026" value={name} onChange={e => setName(e.target.value)} />
         <button className="btn btn-g" onClick={createCompetition}>Create</button>
       </div>
+
+      <RoundsCard competition={activeCompetition} rounds={rounds} showToast={showToast} />
 
       <div className="card">
         <div className="ch">Competitions</div>
@@ -254,6 +323,7 @@ export default function App() {
   };
   const [tab, setTab] = useState("standings");
   const [toast, setToast] = useState("");
+  const [rounds, setRounds] = useState([]);
 
   const showToast = useCallback((msg) => {
     setToast(msg); setTimeout(() => setToast(""), 3200);
@@ -277,6 +347,19 @@ export default function App() {
       });
     }
   }, [loading, members.length]);
+
+  const activeCompetitionId = competitions.find(c => c.status === "active")?.id || null;
+
+  // Rounds live under the active competition, so this listener re-subscribes
+  // whenever which competition is active changes (including on rollover).
+  useEffect(() => {
+    if (!activeCompetitionId) { setRounds([]); return; }
+    const u = onSnapshot(
+      query(collection(db, `competitions/${activeCompetitionId}/rounds`), orderBy("roundNumber", "asc")),
+      s => setRounds(s.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    return () => u();
+  }, [activeCompetitionId]);
 
   if (loading) return (<><style>{CSS}</style><div className="loading"><div className="spin" /><span>Loading…</span></div></>);
   if (!user) return (<><style>{CSS}</style><LoginScreen members={members} onLogin={setUser} /></>);
@@ -307,7 +390,7 @@ export default function App() {
           {tab === "round" && <ComingSoon title="This Round's Picks" sub="Visible once submissions close." />}
           {tab === "grid" && <ComingSoon title="Full History Grid" sub="Player x round grid, coming soon." />}
           {tab === "account" && <AccountTab user={user} />}
-          {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} showToast={showToast} />}
+          {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} showToast={showToast} />}
         </div>
         {toast && <div className="toast">{toast}</div>}
         <div className="nav">
