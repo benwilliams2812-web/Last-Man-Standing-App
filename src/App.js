@@ -7,6 +7,10 @@ import {
 import { db } from "./firebase";
 
 const ENTRY_FEE = 10;
+// Mirrors the same constant in api/settle-round.js -- duplicated because
+// this side runs client-side (Amend Fixture) rather than in the serverless
+// function, so there's no shared module between the two runtimes.
+const LAST_MATCHDAY = 38;
 
 /* ═══════════════════════════════════════════════════════════════════
    LAST MAN STANDING — Premier League survivor pool
@@ -80,7 +84,16 @@ html,body{height:100%;background:var(--ink);-webkit-tap-highlight-color:transpar
 .btn-g{background:linear-gradient(135deg,var(--rail) 0%,var(--rail2) 100%);color:#fff;}
 .btn-sm{width:auto;padding:7px 14px;font-size:12px;border-radius:7px;}
 .btn-d{background:rgba(234,2,26,.12);color:var(--lose);border:1px solid rgba(234,2,26,.3);}
+.btn-gh{background:rgba(255,255,255,.05);color:var(--chalk);border:1px solid rgba(255,255,255,.12);}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
+.grid-wrap{overflow-x:auto;margin:-4px -4px 0;padding:4px;}
+.grid-table{border-collapse:collapse;width:100%;font-size:12px;}
+.grid-table th,.grid-table td{padding:8px 12px;text-align:left;border-bottom:1px solid rgba(255,255,255,.06);white-space:nowrap;}
+.grid-table th{color:var(--mist);font-size:10px;text-transform:uppercase;letter-spacing:.5px;font-weight:600;}
+.grid-table td.gname{position:sticky;left:0;background:var(--panel);font-weight:600;color:var(--chalk);}
+.grid-win{color:var(--win);}
+.grid-lose{color:var(--lose);text-decoration:line-through;text-decoration-color:rgba(234,2,26,.5);}
+.grid-pending{color:var(--mist);}
 .empty{text-align:center;padding:36px 20px;color:var(--mist);}
 .ei{font-size:34px;margin-bottom:10px;}
 .et{font-size:15px;font-weight:600;color:var(--chalk);margin-bottom:5px;}
@@ -280,6 +293,125 @@ function PickTab({ competition, openRound, fixtures, myPlayer, myPick, user, sho
   );
 }
 
+// ─── ROUND TAB (This Round's Picks) ─────────────────────────────────
+// Hidden while the round is still open (so nobody can copy a pick before
+// the deadline) -- becomes visible the moment it's closed, with results
+// layered in as the round gets settled.
+function outcomeBadge(outcome) {
+  if (outcome === "win") return <span className="badge b-admin">won</span>;
+  if (outcome === "eliminated") return <span className="badge" style={{ background: "rgba(234,2,26,.12)", color: "var(--lose)" }}>lost</span>;
+  return <span className="badge b-player">pending</span>;
+}
+
+function RoundTab({ competition, round, players, picks, members }) {
+  if (!competition) return <EmptyState title="No competition running" sub="Ask the Admin to start one." />;
+  if (!round) return <EmptyState title="No rounds yet" sub="Check back once the Admin imports the first round." />;
+  if (round.status === "open" || round.status === "pending") {
+    return <EmptyState icon="🔒" title="Picks are hidden" sub="Everyone's pick for this round will show here once submissions close." />;
+  }
+
+  const activePlayers = players.filter(p => p.active && !p.suspended);
+  const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
+  const pickFor = (id) => picks.find(p => p.id === id) || null;
+
+  return (
+    <div className="fade-in">
+      <div className="card">
+        <div className="ch">Round {round.roundNumber} Picks {round.status === "settled" ? "— Settled" : "— Closed"}</div>
+        {activePlayers.length === 0
+          ? <div className="es" style={{ color: "var(--mist)" }}>No active players in this competition.</div>
+          : activePlayers.map(p => {
+            const pick = pickFor(p.id);
+            return (
+              <div key={p.id} className="mem-row">
+                <div className="mem-l">
+                  <div className="mem-av">{mkInitials(nameFor(p.id))}</div>
+                  <div>
+                    <div className="mem-name">{nameFor(p.id)}</div>
+                    <div className="mem-sub">{pick ? `${pick.team}${pick.autoAssigned ? " (auto)" : ""}` : "No pick submitted"}</div>
+                  </div>
+                </div>
+                {pick ? outcomeBadge(pick.outcome) : <span className="badge" style={{ background: "rgba(234,2,26,.1)", color: "#c07070" }}>missed</span>}
+              </div>
+            );
+          })}
+      </div>
+    </div>
+  );
+}
+
+// ─── GRID TAB (Full History) ────────────────────────────────────────
+// Mirrors the spreadsheet: one row per player, one column per round. Not
+// wired to real-time listeners like everything else -- it's a look-back
+// view, not something that needs millisecond sync, so it's a plain fetch
+// per round that re-runs whenever the round list changes.
+function GridTab({ competition, rounds, players, members }) {
+  const [picksByRound, setPicksByRound] = useState({});
+  const [loadingGrid, setLoadingGrid] = useState(false);
+  const roundIds = rounds.map(r => r.id).join(",");
+
+  useEffect(() => {
+    if (!competition || rounds.length === 0) { setPicksByRound({}); return; }
+    let cancelled = false;
+    setLoadingGrid(true);
+    (async () => {
+      const entries = await Promise.all(rounds.map(async r => {
+        const snap = await getDocs(collection(db, `competitions/${competition.id}/rounds/${r.id}/picks`));
+        const map = {};
+        snap.docs.forEach(d => { map[d.id] = d.data(); });
+        return [r.id, map];
+      }));
+      if (!cancelled) { setPicksByRound(Object.fromEntries(entries)); setLoadingGrid(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [competition?.id, roundIds]);
+
+  if (!competition) return <EmptyState title="No competition running" sub="Ask the Admin to start one." />;
+  if (rounds.length === 0) return <EmptyState title="No rounds yet" sub="Check back once the Admin imports the first round." />;
+  if (loadingGrid) return <EmptyState icon="⏳" title="Loading grid…" sub="" />;
+
+  const activePlayers = players.filter(p => p.active && !p.suspended);
+  const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
+  const cellClass = (outcome) => outcome === "win" ? "grid-win" : outcome === "eliminated" ? "grid-lose" : "grid-pending";
+
+  return (
+    <div className="fade-in">
+      <div className="card">
+        <div className="ch">{competition.name} — Full Grid</div>
+        {activePlayers.length === 0
+          ? <div className="es" style={{ color: "var(--mist)" }}>No active players in this competition.</div>
+          : (
+            <div className="grid-wrap">
+              <table className="grid-table">
+                <thead>
+                  <tr>
+                    <th className="gname">Player</th>
+                    {rounds.map(r => <th key={r.id}>R{r.roundNumber}</th>)}
+                  </tr>
+                </thead>
+                <tbody>
+                  {activePlayers.map(p => (
+                    <tr key={p.id}>
+                      <td className="gname">{nameFor(p.id)}</td>
+                      {rounds.map(r => {
+                        const pick = picksByRound[r.id]?.[p.id];
+                        return (
+                          <td key={r.id} className={pick ? cellClass(pick.outcome) : "grid-pending"}>
+                            {pick ? pick.team : "—"}
+                          </td>
+                        );
+                      })}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+      </div>
+    </div>
+  );
+}
+
 // ─── ROUNDS CARD (Admin) ────────────────────────────────────────────
 function fmtDeadline(iso) {
   if (!iso) return "";
@@ -320,6 +452,170 @@ async function undoRound(competitionId, round) {
   await batch.commit();
 }
 
+// Corrects a single fixture's result without touching the rest of the
+// round -- for when the feed was wrong, a fixture was postponed, or a
+// decision changed on review (design doc Section 2.4/8.5). Only the picks
+// tied to this one fixture are recalculated; everything else in the round
+// is left exactly as it was.
+async function amendFixture(competitionId, round, fixture, newResult) {
+  const picksSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/picks`));
+  const affected = picksSnap.docs.filter(d => d.data().fixtureId === fixture.id);
+
+  const batch = writeBatch(db);
+
+  // Undo whatever this fixture's previous result did to these picks, if anything.
+  for (const pickDoc of affected) {
+    const pick = pickDoc.data();
+    if (pick.outcome === "pending") continue;
+    const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
+    const playerSnap = await getDoc(playerRef);
+    const player = playerSnap.data() || {};
+    batch.set(playerRef, { teamsUsed: (player.teamsUsed || []).filter(t => t !== pick.team), alive: true }, { merge: true });
+  }
+
+  batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/fixtures/${fixture.id}`), {
+    result: newResult, homeScore: null, awayScore: null,
+  }, { merge: true });
+
+  // Apply the corrected result.
+  for (const pickDoc of affected) {
+    const pick = pickDoc.data();
+    const pickedHome = pick.team === fixture.home;
+    const won = (pickedHome && newResult === "home") || (!pickedHome && newResult === "away");
+    batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/picks/${pickDoc.id}`), { outcome: won ? "win" : "eliminated" }, { merge: true });
+
+    const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
+    const playerSnap = await getDoc(playerRef);
+    const player = playerSnap.data() || {};
+    const teamsUsed = new Set(player.teamsUsed || []);
+    teamsUsed.add(pick.team);
+    batch.set(playerRef, { teamsUsed: [...teamsUsed], alive: won }, { merge: true });
+  }
+
+  await batch.commit();
+
+  // Re-check end-of-competition status, but only once every fixture in the
+  // round has a result -- same gate settle-round.js uses.
+  const fixturesSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`));
+  const allFinished = fixturesSnap.docs.every(d => d.data().result != null);
+  if (!allFinished) return;
+
+  const playersSnap = await getDocs(collection(db, `competitions/${competitionId}/players`));
+  const activePlayers = playersSnap.docs.map(d => ({ id: d.id, ...d.data() })).filter(p => p.active && !p.suspended);
+  const alivePlayers = activePlayers.filter(p => p.alive);
+
+  if (alivePlayers.length === 1) {
+    await setDoc(doc(db, `competitions/${competitionId}`), { status: "completed", winner: alivePlayers[0].id, needsResolution: false }, { merge: true });
+  } else if (alivePlayers.length === 0) {
+    await setDoc(doc(db, `competitions/${competitionId}`), {
+      needsResolution: true, resolutionReason: "all-eliminated", resolutionCandidates: activePlayers.map(p => p.id),
+    }, { merge: true });
+  } else if (round.matchday >= LAST_MATCHDAY) {
+    await setDoc(doc(db, `competitions/${competitionId}`), {
+      needsResolution: true, resolutionReason: "season-ended", resolutionCandidates: alivePlayers.map(p => p.id),
+    }, { merge: true });
+  } else {
+    // Amending may have un-resolved a previously declared winner/resolution.
+    await setDoc(doc(db, `competitions/${competitionId}`), {
+      status: "active", winner: null, needsResolution: false, resolutionReason: null, resolutionCandidates: [],
+    }, { merge: true });
+  }
+}
+
+function AmendPanel({ competitionId, round, showToast }) {
+  const [open, setOpen] = useState(false);
+  const [fixtures, setFixtures] = useState(null);
+  const [busyId, setBusyId] = useState(null);
+
+  const toggle = async () => {
+    if (!open && fixtures === null) {
+      const snap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`));
+      setFixtures(snap.docs.map(d => ({ id: d.id, ...d.data() })));
+    }
+    setOpen(o => !o);
+  };
+
+  const apply = async (fixture, result) => {
+    setBusyId(fixture.id);
+    try {
+      await amendFixture(competitionId, round, fixture, result);
+      setFixtures(fs => fs.map(f => (f.id === fixture.id ? { ...f, result } : f)));
+      showToast(`${fixture.home} vs ${fixture.away} corrected`);
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <button className="btn btn-sm btn-gh" style={{ width: "100%" }} onClick={toggle}>
+        {open ? "Hide fixtures" : "Amend a fixture"}
+      </button>
+      {open && fixtures && fixtures.map(f => (
+        <div key={f.id} className="mem-row">
+          <div className="mem-l">
+            <div>
+              <div className="mem-name" style={{ fontSize: 13 }}>{f.home} vs {f.away}</div>
+              <div className="mem-sub">current: {f.result || "no result yet"}</div>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 4 }}>
+            {["home", "draw", "away"].map(r => (
+              <button
+                key={r}
+                className="btn btn-sm"
+                disabled={busyId === f.id}
+                style={{ background: f.result === r ? "var(--rail)" : "rgba(255,255,255,.06)", color: f.result === r ? "#fff" : "var(--mist)" }}
+                onClick={() => apply(f, r)}
+              >
+                {r === "home" ? "Home" : r === "draw" ? "Draw" : "Away"}
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+// Fills in a random unused team for every active, alive player who didn't
+// submit a pick before the round closed — design doc Section 2.1. Runs
+// automatically as part of closing a round (see setStatus below); there's
+// no separate kickoff-time cron yet, so a round only gets this treatment
+// when the Admin actually closes it.
+async function autoAssignMissedPicks(competitionId, round) {
+  const [playersSnap, fixturesSnap, picksSnap] = await Promise.all([
+    getDocs(collection(db, `competitions/${competitionId}/players`)),
+    getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`)),
+    getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/picks`)),
+  ]);
+
+  const fixtures = fixturesSnap.docs.map(d => ({ id: d.id, ...d.data() }));
+  const pickedIds = new Set(picksSnap.docs.map(d => d.id));
+  const missed = playersSnap.docs
+    .map(d => ({ id: d.id, ...d.data() }))
+    .filter(p => p.active && !p.suspended && p.alive && !pickedIds.has(p.id));
+
+  if (missed.length === 0) return 0;
+
+  const batch = writeBatch(db);
+  let assigned = 0;
+  for (const player of missed) {
+    const teamsUsed = new Set(player.teamsUsed || []);
+    const options = fixtures
+      .flatMap(f => ([{ fixtureId: f.id, team: f.home }, { fixtureId: f.id, team: f.away }]))
+      .filter(o => !teamsUsed.has(o.team));
+    if (options.length === 0) continue; // no unused teams left -- shouldn't normally happen
+    const choice = options[Math.floor(Math.random() * options.length)];
+    batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/picks/${player.id}`), {
+      team: choice.team, fixtureId: choice.fixtureId, outcome: "pending", autoAssigned: true, submittedAt: serverTimestamp(),
+    });
+    assigned++;
+  }
+  await batch.commit();
+  return assigned;
+}
+
 function RoundsCard({ competition, rounds, showToast }) {
   const [importing, setImporting] = useState(false);
   const [settlingId, setSettlingId] = useState(null);
@@ -346,6 +642,12 @@ function RoundsCard({ competition, rounds, showToast }) {
   };
 
   const setStatus = async (round, status) => {
+    if (status === "closed") {
+      const assigned = await autoAssignMissedPicks(competition.id, round);
+      await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
+      showToast(assigned > 0 ? `Round ${round.roundNumber} closed — ${assigned} random pick${assigned > 1 ? "s" : ""} auto-assigned` : `Round ${round.roundNumber} closed`);
+      return;
+    }
     await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
     showToast(`Round ${round.roundNumber} ${status}`);
   };
@@ -382,28 +684,32 @@ function RoundsCard({ competition, rounds, showToast }) {
       {rounds.length === 0
         ? <div className="es" style={{ color: "var(--mist)" }}>No rounds yet — import the first one above.</div>
         : rounds.map(r => (
-          <div key={r.id} className="mem-row">
-            <div className="mem-l">
-              <div>
-                <div className="mem-name">Round {r.roundNumber}</div>
-                <div className="mem-sub">{r.status} · deadline {fmtDeadline(r.deadline)}</div>
+          <div key={r.id} style={{ borderBottom: "1px solid rgba(255,255,255,.06)", paddingBottom: 8, marginBottom: 8 }}>
+            <div className="mem-row" style={{ borderBottom: "none", paddingBottom: 0 }}>
+              <div className="mem-l">
+                <div>
+                  <div className="mem-name">Round {r.roundNumber}</div>
+                  <div className="mem-sub">{r.status} · deadline {fmtDeadline(r.deadline)}</div>
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6 }}>
+                {r.status !== "open" && r.status !== "closed" && r.status !== "settled" &&
+                  <button className="btn btn-sm btn-g" onClick={() => setStatus(r, "open")}>Open</button>}
+                {r.status === "open" &&
+                  <button className="btn btn-sm btn-d" onClick={() => setStatus(r, "closed")}>Close</button>}
+                {r.status === "closed" &&
+                  <button className="btn btn-sm btn-g" disabled={settlingId === r.id} onClick={() => settleRound(r)}>
+                    {settlingId === r.id ? "Settling…" : "Settle Results"}
+                  </button>}
+                {r.status === "settled" &&
+                  <>
+                    <span className="badge b-admin">settled</span>
+                    <button className="btn btn-sm btn-d" onClick={() => handleUndo(r)}>Undo</button>
+                  </>}
               </div>
             </div>
-            <div style={{ display: "flex", gap: 6 }}>
-              {r.status !== "open" && r.status !== "closed" && r.status !== "settled" &&
-                <button className="btn btn-sm btn-g" onClick={() => setStatus(r, "open")}>Open</button>}
-              {r.status === "open" &&
-                <button className="btn btn-sm btn-d" onClick={() => setStatus(r, "closed")}>Close</button>}
-              {r.status === "closed" &&
-                <button className="btn btn-sm btn-g" disabled={settlingId === r.id} onClick={() => settleRound(r)}>
-                  {settlingId === r.id ? "Settling…" : "Settle Results"}
-                </button>}
-              {r.status === "settled" &&
-                <>
-                  <span className="badge b-admin">settled</span>
-                  <button className="btn btn-sm btn-d" onClick={() => handleUndo(r)}>Undo</button>
-                </>}
-            </div>
+            {(r.status === "closed" || r.status === "settled") &&
+              <AmendPanel competitionId={competition.id} round={r} showToast={showToast} />}
           </div>
         ))}
     </div>
@@ -618,7 +924,7 @@ function AdminTab({ members, competitions, activeCompetition, rounds, players, s
 }
 
 // ─── ACCOUNT TAB ────────────────────────────────────────────────────
-function AccountTab({ user }) {
+function AccountTab({ user, setUser }) {
   return (
     <div className="fade-in card">
       <div className="ch">Account</div>
@@ -631,6 +937,7 @@ function AccountTab({ user }) {
           </div>
         </div>
       </div>
+      <button className="btn btn-d" style={{ marginTop: 14 }} onClick={() => setUser(null)}>Log Out</button>
     </div>
   );
 }
@@ -706,27 +1013,31 @@ export default function App() {
     return () => u();
   }, [activeCompetitionId]);
 
-  const openRoundId = rounds.find(r => r.status === "open")?.id || null;
+  // "Current" round = whichever is open, or failing that the most recent
+  // one (so the Round tab still has something to show once a round closes,
+  // right up until the next round opens). Pick tab only ever acts on a
+  // genuinely *open* round — see openRound below.
+  const currentRoundId = rounds.find(r => r.status === "open")?.id || rounds[rounds.length - 1]?.id || null;
 
-  // Fixtures and picks both live under the currently open round, so both
-  // re-subscribe whenever which round is open changes.
+  // Fixtures and picks both live under the current round, so both
+  // re-subscribe whenever which round is current changes.
   useEffect(() => {
-    if (!activeCompetitionId || !openRoundId) { setFixtures([]); return; }
+    if (!activeCompetitionId || !currentRoundId) { setFixtures([]); return; }
     const u = onSnapshot(
-      collection(db, `competitions/${activeCompetitionId}/rounds/${openRoundId}/fixtures`),
+      collection(db, `competitions/${activeCompetitionId}/rounds/${currentRoundId}/fixtures`),
       s => setFixtures(s.docs.map(d => ({ id: d.id, ...d.data() })))
     );
     return () => u();
-  }, [activeCompetitionId, openRoundId]);
+  }, [activeCompetitionId, currentRoundId]);
 
   useEffect(() => {
-    if (!activeCompetitionId || !openRoundId) { setPicks([]); return; }
+    if (!activeCompetitionId || !currentRoundId) { setPicks([]); return; }
     const u = onSnapshot(
-      collection(db, `competitions/${activeCompetitionId}/rounds/${openRoundId}/picks`),
+      collection(db, `competitions/${activeCompetitionId}/rounds/${currentRoundId}/picks`),
       s => setPicks(s.docs.map(d => ({ id: d.id, ...d.data() })))
     );
     return () => u();
-  }, [activeCompetitionId, openRoundId]);
+  }, [activeCompetitionId, currentRoundId]);
 
   if (loading) return (<><style>{CSS}</style><div className="loading"><div className="spin" /><span>Loading…</span></div></>);
   if (!user) return (<><style>{CSS}</style><LoginScreen members={members} onLogin={setUser} /></>);
@@ -736,7 +1047,8 @@ export default function App() {
   // a winner/split banner) when there's no active one — e.g. right after a
   // clean winner is declared, before the Admin starts anything new.
   const displayCompetition = activeCompetition || competitions[0] || null;
-  const openRound = rounds.find(r => r.id === openRoundId) || null;
+  const currentRound = rounds.find(r => r.id === currentRoundId) || null;
+  const openRound = currentRound?.status === "open" ? currentRound : null;
   const myPlayer = players.find(p => p.id === user.id) || null;
   const myPick = picks.find(p => p.id === user.id) || null;
 
@@ -761,9 +1073,9 @@ export default function App() {
         <div className="content">
           {tab === "standings" && <StandingsTab competition={displayCompetition} players={players} members={members} />}
           {tab === "pick" && <PickTab competition={activeCompetition} openRound={openRound} fixtures={fixtures} myPlayer={myPlayer} myPick={myPick} user={user} showToast={showToast} />}
-          {tab === "round" && <EmptyState title="This Round's Picks" sub="Visible once submissions close." />}
-          {tab === "grid" && <EmptyState title="Full History Grid" sub="Player x round grid, coming soon." />}
-          {tab === "account" && <AccountTab user={user} />}
+          {tab === "round" && <RoundTab competition={activeCompetition} round={currentRound} players={players} picks={picks} members={members} />}
+          {tab === "grid" && <GridTab competition={activeCompetition} rounds={rounds} players={players} members={members} />}
+          {tab === "account" && <AccountTab user={user} setUser={setUser} />}
           {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} players={players} showToast={showToast} />}
         </div>
         {toast && <div className="toast">{toast}</div>}
