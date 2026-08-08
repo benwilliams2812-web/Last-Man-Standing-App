@@ -2,9 +2,11 @@
 import { useState, useEffect, useCallback } from "react";
 import {
   collection, doc, addDoc, setDoc,
-  onSnapshot, query, orderBy, serverTimestamp
+  onSnapshot, query, orderBy, serverTimestamp, writeBatch
 } from "firebase/firestore";
 import { db } from "./firebase";
+
+const ENTRY_FEE = 10;
 
 /* ═══════════════════════════════════════════════════════════════════
    LAST MAN STANDING — Premier League survivor pool
@@ -129,7 +131,7 @@ function LoginScreen({ members, onLogin }) {
 }
 
 // ─── STANDINGS TAB ──────────────────────────────────────────────────
-function StandingsTab({ competition }) {
+function StandingsTab({ competition, players, members }) {
   if (!competition) {
     return (
       <div className="fade-in empty">
@@ -139,15 +141,43 @@ function StandingsTab({ competition }) {
       </div>
     );
   }
+
+  const activePlayers = players.filter(p => p.active && !p.suspended);
+  const pot = (competition.jackpot || 0) + activePlayers.length * ENTRY_FEE;
+  const alive = activePlayers.filter(p => p.alive);
+  const eliminated = activePlayers.filter(p => !p.alive);
+  const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
+
   return (
     <div className="fade-in">
       <div className="ss">
-        <div className="st"><div className="sv">£{competition.jackpot || 0}</div><div className="sl">Prize Pot</div></div>
-        <div className="st"><div className="sv">{competition.status}</div><div className="sl">Status</div></div>
+        <div className="st"><div className="sv">£{pot}</div><div className="sl">Prize Pot</div></div>
+        <div className="st"><div className="sv">{alive.length}</div><div className="sl">Players Alive</div></div>
       </div>
       <div className="card">
         <div className="ch">{competition.name}</div>
-        <div className="es" style={{ color: "var(--mist)" }}>Standings will appear here once rounds are underway.</div>
+        {activePlayers.length === 0
+          ? <div className="es" style={{ color: "var(--mist)" }}>No active players yet — the Admin is still activating entries.</div>
+          : <>
+            {alive.map(p => (
+              <div key={p.id} className="mem-row">
+                <div className="mem-l">
+                  <div className="mem-av">{mkInitials(nameFor(p.id))}</div>
+                  <div className="mem-name">{nameFor(p.id)}</div>
+                </div>
+                <span className="badge b-admin">alive</span>
+              </div>
+            ))}
+            {eliminated.map(p => (
+              <div key={p.id} className="mem-row">
+                <div className="mem-l">
+                  <div className="mem-av" style={{ background: "var(--mist)" }}>{mkInitials(nameFor(p.id))}</div>
+                  <div className="mem-name" style={{ color: "var(--mist)" }}>{nameFor(p.id)}</div>
+                </div>
+                <span className="badge" style={{ background: "rgba(234,2,26,.12)", color: "var(--lose)" }}>out</span>
+              </div>
+            ))}
+          </>}
       </div>
     </div>
   );
@@ -229,18 +259,116 @@ function RoundsCard({ competition, rounds, showToast }) {
   );
 }
 
+// ─── PLAYERS CARD (Admin) ───────────────────────────────────────────
+// A "player" doc under the active competition is that member's status
+// for THIS competition only (paid/active/suspended, alive, teamsUsed).
+// It's created pending as soon as a member exists and a competition is
+// active — either when the competition is created (for everyone already
+// on the roster) or when a new member is added mid-competition.
+function playerStatusLabel(p) {
+  if (!p) return "no competition";
+  if (p.suspended) return "suspended";
+  if (p.active) return "active";
+  return "pending";
+}
+
+function PlayersCard({ members, players, activeCompetition, showToast }) {
+  const [name, setName] = useState("");
+  const [pin, setPin] = useState("");
+
+  const playerFor = (memberId) => players.find(p => p.id === memberId);
+
+  const addMember = async () => {
+    if (!name.trim()) { showToast("Enter a name"); return; }
+    if (!/^\d{4}$/.test(pin)) { showToast("PIN must be 4 digits"); return; }
+    const memberRef = await addDoc(collection(db, "members"), {
+      name: name.trim(), pin, role: "player",
+    });
+    if (activeCompetition) {
+      await setDoc(doc(db, `competitions/${activeCompetition.id}/players/${memberRef.id}`), {
+        paid: false, active: false, suspended: false, alive: true, teamsUsed: [],
+      });
+    }
+    setName(""); setPin("");
+    showToast(`${name.trim()} added`);
+  };
+
+  const activate = async (memberId) => {
+    if (!activeCompetition) return;
+    await setDoc(doc(db, `competitions/${activeCompetition.id}/players/${memberId}`), {
+      paid: true, active: true, suspended: false,
+    }, { merge: true });
+    showToast("Player activated");
+  };
+
+  const suspend = async (memberId) => {
+    if (!activeCompetition) return;
+    await setDoc(doc(db, `competitions/${activeCompetition.id}/players/${memberId}`), {
+      active: false, suspended: true,
+    }, { merge: true });
+    showToast("Player suspended");
+  };
+
+  const roster = members.filter(m => m.role !== "admin");
+
+  return (
+    <div className="card">
+      <div className="ch">Add a Player</div>
+      <input className="fi" placeholder="Name" value={name} onChange={e => setName(e.target.value)} />
+      <input className="fi" placeholder="4-digit starting PIN" inputMode="numeric" maxLength={4}
+        value={pin} onChange={e => setPin(e.target.value.replace(/\D/g, ""))} />
+      <button className="btn btn-g" onClick={addMember}>Add Player</button>
+
+      <div className="ch" style={{ marginTop: 20 }}>Players{activeCompetition ? ` — ${activeCompetition.name}` : ""}</div>
+      {roster.length === 0
+        ? <div className="es" style={{ color: "var(--mist)" }}>No players yet — add one above.</div>
+        : roster.map(m => {
+          const p = playerFor(m.id);
+          const status = playerStatusLabel(p);
+          return (
+            <div key={m.id} className="mem-row">
+              <div className="mem-l">
+                <div className="mem-av">{mkInitials(m.name)}</div>
+                <div>
+                  <div className="mem-name">{m.name}</div>
+                  <div className="mem-sub">{status}</div>
+                </div>
+              </div>
+              {activeCompetition && (
+                <div style={{ display: "flex", gap: 6 }}>
+                  {status !== "active" &&
+                    <button className="btn btn-sm btn-g" onClick={() => activate(m.id)}>Activate</button>}
+                  {status === "active" &&
+                    <button className="btn btn-sm btn-d" onClick={() => suspend(m.id)}>Suspend</button>}
+                </div>
+              )}
+            </div>
+          );
+        })}
+    </div>
+  );
+}
+
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
-function AdminTab({ members, competitions, activeCompetition, rounds, showToast }) {
+function AdminTab({ members, competitions, activeCompetition, rounds, players, showToast }) {
   const [name, setName] = useState("");
 
   const createCompetition = async () => {
     if (!name.trim()) { showToast("Give the competition a name"); return; }
-    await addDoc(collection(db, "competitions"), {
+    const compRef = await addDoc(collection(db, "competitions"), {
       name: name.trim(),
       status: "active",
       jackpot: 0,
       createdAt: serverTimestamp(),
     });
+    // Every existing (non-admin) member joins the new competition as pending.
+    const batch = writeBatch(db);
+    members.filter(m => m.role !== "admin").forEach(m => {
+      batch.set(doc(db, `competitions/${compRef.id}/players/${m.id}`), {
+        paid: false, active: false, suspended: false, alive: true, teamsUsed: [],
+      });
+    });
+    await batch.commit();
     setName("");
     showToast("Competition created");
   };
@@ -255,6 +383,8 @@ function AdminTab({ members, competitions, activeCompetition, rounds, showToast 
 
       <RoundsCard competition={activeCompetition} rounds={rounds} showToast={showToast} />
 
+      <PlayersCard members={members} players={players} activeCompetition={activeCompetition} showToast={showToast} />
+
       <div className="card">
         <div className="ch">Competitions</div>
         {competitions.length === 0
@@ -265,21 +395,6 @@ function AdminTab({ members, competitions, activeCompetition, rounds, showToast 
               <span className={`badge ${c.status === "active" ? "b-admin" : "b-player"}`}>{c.status}</span>
             </div>
           ))}
-      </div>
-
-      <div className="card">
-        <div className="ch">Members</div>
-        {members.map(m => (
-          <div key={m.id} className="mem-row">
-            <div className="mem-l">
-              <div className="mem-av">{mkInitials(m.name)}</div>
-              <div>
-                <div className="mem-name">{m.name}</div>
-                <div className="mem-sub">{m.role}</div>
-              </div>
-            </div>
-          </div>
-        ))}
       </div>
     </div>
   );
@@ -324,6 +439,7 @@ export default function App() {
   const [tab, setTab] = useState("standings");
   const [toast, setToast] = useState("");
   const [rounds, setRounds] = useState([]);
+  const [players, setPlayers] = useState([]);
 
   const showToast = useCallback((msg) => {
     setToast(msg); setTimeout(() => setToast(""), 3200);
@@ -350,13 +466,23 @@ export default function App() {
 
   const activeCompetitionId = competitions.find(c => c.status === "active")?.id || null;
 
-  // Rounds live under the active competition, so this listener re-subscribes
-  // whenever which competition is active changes (including on rollover).
+  // Rounds and players both live under the active competition, so both
+  // listeners re-subscribe whenever which competition is active changes
+  // (including on rollover).
   useEffect(() => {
     if (!activeCompetitionId) { setRounds([]); return; }
     const u = onSnapshot(
       query(collection(db, `competitions/${activeCompetitionId}/rounds`), orderBy("roundNumber", "asc")),
       s => setRounds(s.docs.map(d => ({ id: d.id, ...d.data() })))
+    );
+    return () => u();
+  }, [activeCompetitionId]);
+
+  useEffect(() => {
+    if (!activeCompetitionId) { setPlayers([]); return; }
+    const u = onSnapshot(
+      collection(db, `competitions/${activeCompetitionId}/players`),
+      s => setPlayers(s.docs.map(d => ({ id: d.id, ...d.data() })))
     );
     return () => u();
   }, [activeCompetitionId]);
@@ -385,12 +511,12 @@ export default function App() {
           </div>
         </div>
         <div className="content">
-          {tab === "standings" && <StandingsTab competition={activeCompetition} />}
+          {tab === "standings" && <StandingsTab competition={activeCompetition} players={players} members={members} />}
           {tab === "pick" && <ComingSoon title="Pick" sub="Team selection is coming next." />}
           {tab === "round" && <ComingSoon title="This Round's Picks" sub="Visible once submissions close." />}
           {tab === "grid" && <ComingSoon title="Full History Grid" sub="Player x round grid, coming soon." />}
           {tab === "account" && <AccountTab user={user} />}
-          {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} showToast={showToast} />}
+          {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} players={players} showToast={showToast} />}
         </div>
         {toast && <div className="toast">{toast}</div>}
         <div className="nav">
