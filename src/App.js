@@ -289,6 +289,24 @@ function PickTab({ competition, openRound, fixtures, myPlayer, myPick, user, sho
           {saving ? "Saving…" : myPick ? "Change Pick" : "Submit Pick"}
         </button>
       </div>
+
+      <div className="card">
+        <div className="ch">Round {openRound.roundNumber} Fixtures</div>
+        {[...fixtures].sort((a, b) => (a.kickoff || "").localeCompare(b.kickoff || "")).map(f => (
+          <div key={f.id} className="mem-row">
+            <div className="mem-l">
+              <div>
+                <div className="mem-name" style={{ fontSize: 13 }}>
+                  {f.home}{teamsUsed.has(f.home) && <span style={{ color: "var(--mist)" }}> (used)</span>}
+                  {" vs "}
+                  {f.away}{teamsUsed.has(f.away) && <span style={{ color: "var(--mist)" }}> (used)</span>}
+                </div>
+                <div className="mem-sub">{fmtDeadline(f.kickoff)}</div>
+              </div>
+            </div>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }
