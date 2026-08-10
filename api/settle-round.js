@@ -37,8 +37,8 @@ function getDb() {
 }
 
 async function fetchMatchday(matchday) {
-  const apiKey = process.env.FOOTBALL_DATA_API_KEY;
-  if (!apiKey) throw Object.assign(new Error("FOOTBALL_DATA_API_KEY not configured"), { status: 500 });
+  const apiKey = process.env.FOOTBALL_DAT_API_KEY;
+  if (!apiKey) throw Object.assign(new Error("FOOTBALL_DAT_API_KEY not configured"), { status: 500 });
 
   const res = await fetch(
     `https://api.football-data.org/v4/competitions/PL/matches?matchday=${matchday}`,
