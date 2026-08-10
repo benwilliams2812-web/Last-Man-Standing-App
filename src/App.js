@@ -85,6 +85,9 @@ html,body{height:100%;background:var(--ink);-webkit-tap-highlight-color:transpar
 .btn-sm{width:auto;padding:7px 14px;font-size:12px;border-radius:7px;}
 .btn-d{background:rgba(234,2,26,.12);color:var(--lose);border:1px solid rgba(234,2,26,.3);}
 .btn-gh{background:rgba(255,255,255,.05);color:var(--chalk);border:1px solid rgba(255,255,255,.12);}
+.tabs{display:flex;gap:6px;margin-bottom:16px;}
+.tab{flex:1;padding:9px 4px;background:rgba(255,255,255,.04);border:1px solid rgba(255,255,255,.08);border-radius:8px;color:var(--mist);font-size:12px;font-weight:500;cursor:pointer;text-align:center;transition:all .15s;}
+.tab.on{background:rgba(0,60,223,.15);border-color:rgba(0,60,223,.4);color:var(--rail2);font-weight:600;}
 .btn:disabled{opacity:.4;cursor:not-allowed;}
 .grid-wrap{overflow-x:auto;margin:-4px -4px 0;padding:4px;}
 .grid-table{border-collapse:collapse;width:100%;font-size:12px;}
@@ -1056,6 +1059,7 @@ function DangerZoneCard({ showToast }) {
 
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
 function AdminTab({ members, competitions, activeCompetition, rounds, players, showToast }) {
+  const [section, setSection] = useState("fixtures");
   const [name, setName] = useState("");
 
   const createCompetition = async () => {
@@ -1067,33 +1071,55 @@ function AdminTab({ members, competitions, activeCompetition, rounds, players, s
 
   return (
     <div className="fade-in">
-      <ResolutionCard competition={activeCompetition} members={members} players={players} showToast={showToast} />
-
-      <div className="card">
-        <div className="ch">Start a New Competition</div>
-        <input className="fi" placeholder="e.g. 22nd August 2026" value={name} onChange={e => setName(e.target.value)} />
-        <button className="btn btn-g" onClick={createCompetition}>Create</button>
+      <div className="tabs">
+        <div className={`tab ${section === "fixtures" ? "on" : ""}`} onClick={() => setSection("fixtures")}>Fixtures</div>
+        <div className={`tab ${section === "competition" ? "on" : ""}`} onClick={() => setSection("competition")}>Competition</div>
+        <div className={`tab ${section === "users" ? "on" : ""}`} onClick={() => setSection("users")}>Users</div>
       </div>
 
-      <RoundsCard competition={activeCompetition} rounds={rounds} showToast={showToast} />
-
-      {activeCompetition && <ShareCard competition={activeCompetition} rounds={rounds} players={players} members={members} />}
-
-      <PlayersCard members={members} players={players} activeCompetition={activeCompetition} showToast={showToast} />
-
-      <div className="card">
-        <div className="ch">Competitions</div>
-        {competitions.length === 0
-          ? <div className="es" style={{ color: "var(--mist)" }}>None yet.</div>
-          : competitions.map(c => (
-            <div key={c.id} className="mem-row">
-              <div className="mem-l"><div className="mem-name">{c.name}</div></div>
-              <span className={`badge ${c.status === "active" ? "b-admin" : "b-player"}`}>{c.status}</span>
+      {section === "fixtures" && (
+        <>
+          <RoundsCard competition={activeCompetition} rounds={rounds} showToast={showToast} />
+          {activeCompetition && <ShareCard competition={activeCompetition} rounds={rounds} players={players} members={members} />}
+          {!activeCompetition && (
+            <div className="empty">
+              <div className="ei">📋</div>
+              <div className="et">No active competition</div>
+              <div className="es">Start one from the Competition tab first.</div>
             </div>
-          ))}
-      </div>
+          )}
+        </>
+      )}
 
-      <DangerZoneCard showToast={showToast} />
+      {section === "competition" && (
+        <>
+          <ResolutionCard competition={activeCompetition} members={members} players={players} showToast={showToast} />
+
+          <div className="card">
+            <div className="ch">Start a New Competition</div>
+            <input className="fi" placeholder="e.g. 22nd August 2026" value={name} onChange={e => setName(e.target.value)} />
+            <button className="btn btn-g" onClick={createCompetition}>Create</button>
+          </div>
+
+          <div className="card">
+            <div className="ch">Competitions</div>
+            {competitions.length === 0
+              ? <div className="es" style={{ color: "var(--mist)" }}>None yet.</div>
+              : competitions.map(c => (
+                <div key={c.id} className="mem-row">
+                  <div className="mem-l"><div className="mem-name">{c.name}</div></div>
+                  <span className={`badge ${c.status === "active" ? "b-admin" : "b-player"}`}>{c.status}</span>
+                </div>
+              ))}
+          </div>
+
+          <DangerZoneCard showToast={showToast} />
+        </>
+      )}
+
+      {section === "users" && (
+        <PlayersCard members={members} players={players} activeCompetition={activeCompetition} showToast={showToast} />
+      )}
     </div>
   );
 }
