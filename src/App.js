@@ -750,6 +750,7 @@ function playerStatusLabel(p) {
 function PlayersCard({ members, players, activeCompetition, showToast }) {
   const [name, setName] = useState("");
   const [pin, setPin] = useState("");
+  const [removingId, setRemovingId] = useState(null);
 
   const playerFor = (memberId) => players.find(p => p.id === memberId);
 
@@ -784,6 +785,24 @@ function PlayersCard({ members, players, activeCompetition, showToast }) {
     showToast("Player suspended");
   };
 
+  // Removes the member entirely -- cleans up their player doc in every
+  // competition they're part of (not just the active one, so past
+  // competitions don't keep an orphaned reference), then deletes the
+  // member record itself. Their pick history stays in place under each
+  // round (it's keyed by memberId, not a live reference), it just won't
+  // have a name to show against it any more.
+  const removeMember = async (memberId, memberName) => {
+    const compsSnap = await getDocs(collection(db, "competitions"));
+    for (const c of compsSnap.docs) {
+      const playerRef = doc(db, `competitions/${c.id}/players/${memberId}`);
+      const playerSnap = await getDoc(playerRef);
+      if (playerSnap.exists()) await deleteDoc(playerRef);
+    }
+    await deleteDoc(doc(db, "members", memberId));
+    setRemovingId(null);
+    showToast(`${memberName} removed`);
+  };
+
   const roster = members.filter(m => m.role !== "admin");
 
   return (
@@ -800,23 +819,32 @@ function PlayersCard({ members, players, activeCompetition, showToast }) {
         : roster.map(m => {
           const p = playerFor(m.id);
           const status = playerStatusLabel(p);
+          const confirming = removingId === m.id;
           return (
             <div key={m.id} className="mem-row">
               <div className="mem-l">
                 <div className="mem-av">{mkInitials(m.name)}</div>
                 <div>
                   <div className="mem-name">{m.name}</div>
-                  <div className="mem-sub">{status}</div>
+                  <div className="mem-sub">{confirming ? "Remove permanently?" : status}</div>
                 </div>
               </div>
-              {activeCompetition && (
-                <div style={{ display: "flex", gap: 6 }}>
-                  {status !== "active" &&
-                    <button className="btn btn-sm btn-g" onClick={() => activate(m.id)}>Activate</button>}
-                  {status === "active" &&
-                    <button className="btn btn-sm btn-d" onClick={() => suspend(m.id)}>Suspend</button>}
-                </div>
-              )}
+              <div style={{ display: "flex", gap: 6 }}>
+                {confirming ? (
+                  <>
+                    <button className="btn btn-sm btn-gh" onClick={() => setRemovingId(null)}>Cancel</button>
+                    <button className="btn btn-sm btn-d" onClick={() => removeMember(m.id, m.name)}>Confirm</button>
+                  </>
+                ) : (
+                  <>
+                    {activeCompetition && status !== "active" &&
+                      <button className="btn btn-sm btn-g" onClick={() => activate(m.id)}>Activate</button>}
+                    {activeCompetition && status === "active" &&
+                      <button className="btn btn-sm btn-d" onClick={() => suspend(m.id)}>Suspend</button>}
+                    <button className="btn btn-sm btn-gh" onClick={() => setRemovingId(m.id)}>Remove</button>
+                  </>
+                )}
+              </div>
             </div>
           );
         })}
