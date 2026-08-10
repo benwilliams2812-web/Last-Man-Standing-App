@@ -1,7 +1,7 @@
 // src/App.js — v0.1.0 (scaffold)
 import { useState, useEffect, useCallback } from "react";
 import {
-  collection, doc, addDoc, setDoc,
+  collection, doc, addDoc, setDoc, deleteDoc,
   onSnapshot, query, orderBy, serverTimestamp, writeBatch, getDoc, getDocs
 } from "firebase/firestore";
 import { db } from "./firebase";
@@ -964,6 +964,69 @@ function ShareCard({ competition, rounds, players, members }) {
 }
 
 // ─── ADMIN TAB ──────────────────────────────────────────────────────
+// Deletes every competition and everything under it (players, rounds,
+// fixtures, picks) but leaves the /members collection completely alone --
+// player identities (name/PIN/role) are meant to persist across
+// competitions, so a "start again" shouldn't force re-adding everyone.
+// Deliberately separate from scripts/reset-data.js, which is the heavier
+// CLI-only tool that also wipes members.
+async function clearAllCompetitions() {
+  const compsSnap = await getDocs(collection(db, "competitions"));
+  for (const compDoc of compsSnap.docs) {
+    const compId = compDoc.id;
+    const roundsSnap = await getDocs(collection(db, `competitions/${compId}/rounds`));
+    for (const roundDoc of roundsSnap.docs) {
+      const fixturesSnap = await getDocs(collection(db, `competitions/${compId}/rounds/${roundDoc.id}/fixtures`));
+      for (const f of fixturesSnap.docs) await deleteDoc(f.ref);
+      const picksSnap = await getDocs(collection(db, `competitions/${compId}/rounds/${roundDoc.id}/picks`));
+      for (const p of picksSnap.docs) await deleteDoc(p.ref);
+      await deleteDoc(roundDoc.ref);
+    }
+    const playersSnap = await getDocs(collection(db, `competitions/${compId}/players`));
+    for (const p of playersSnap.docs) await deleteDoc(p.ref);
+    await deleteDoc(compDoc.ref);
+  }
+  return compsSnap.docs.length;
+}
+
+function DangerZoneCard({ showToast }) {
+  const [confirming, setConfirming] = useState(false);
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    setBusy(true);
+    try {
+      const count = await clearAllCompetitions();
+      showToast(`Cleared ${count} competition${count === 1 ? "" : "s"} — players untouched`);
+      setConfirming(false);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ borderColor: "rgba(234,2,26,.3)" }}>
+      <div className="ch">Danger Zone</div>
+      {!confirming ? (
+        <button className="btn btn-d" onClick={() => setConfirming(true)}>Clear All Competition Data</button>
+      ) : (
+        <>
+          <div className="es" style={{ color: "var(--chalk)", marginBottom: 12 }}>
+            This deletes every competition, round, fixture and pick — permanently. Members (names/PINs) are kept. Are you sure?
+          </div>
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-gh" style={{ flex: 1 }} disabled={busy} onClick={() => setConfirming(false)}>Cancel</button>
+            <button className="btn btn-d" style={{ flex: 1 }} disabled={busy} onClick={run}>
+              {busy ? "Clearing…" : "Yes, Clear It"}
+            </button>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─── ADMIN TAB ──────────────────────────────────────────────────────
 function AdminTab({ members, competitions, activeCompetition, rounds, players, showToast }) {
   const [name, setName] = useState("");
 
@@ -1001,6 +1064,8 @@ function AdminTab({ members, competitions, activeCompetition, rounds, players, s
             </div>
           ))}
       </div>
+
+      <DangerZoneCard showToast={showToast} />
     </div>
   );
 }
