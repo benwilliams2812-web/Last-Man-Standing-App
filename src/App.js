@@ -1125,7 +1125,30 @@ function AdminTab({ members, competitions, activeCompetition, rounds, players, s
 }
 
 // ─── ACCOUNT TAB ────────────────────────────────────────────────────
-function AccountTab({ user, setUser }) {
+function AccountTab({ user, members, setUser, showToast }) {
+  const [changing, setChanging] = useState(false);
+  const [current, setCurrent] = useState("");
+  const [next, setNext] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  const reset = () => { setChanging(false); setCurrent(""); setNext(""); setConfirm(""); };
+
+  const savePin = async () => {
+    const me = members.find(m => m.id === user.id);
+    if (String(me?.pin) !== current) { showToast("Current PIN is wrong"); return; }
+    if (!/^\d{4}$/.test(next)) { showToast("New PIN must be 4 digits"); return; }
+    if (next !== confirm) { showToast("New PINs don't match"); return; }
+    setSaving(true);
+    try {
+      await setDoc(doc(db, "members", user.id), { pin: next }, { merge: true });
+      showToast("PIN changed");
+      reset();
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <div className="fade-in card">
       <div className="ch">Account</div>
@@ -1138,7 +1161,28 @@ function AccountTab({ user, setUser }) {
           </div>
         </div>
       </div>
-      <button className="btn btn-d" style={{ marginTop: 14 }} onClick={() => setUser(null)}>Log Out</button>
+
+      {!changing ? (
+        <>
+          <button className="btn btn-gh" style={{ marginTop: 14 }} onClick={() => setChanging(true)}>Change PIN</button>
+          <button className="btn btn-d" style={{ marginTop: 8 }} onClick={() => setUser(null)}>Log Out</button>
+        </>
+      ) : (
+        <div style={{ marginTop: 14 }}>
+          <input className="fi" type="password" inputMode="numeric" maxLength={4} placeholder="Current PIN"
+            value={current} onChange={e => setCurrent(e.target.value.replace(/\D/g, ""))} />
+          <input className="fi" type="password" inputMode="numeric" maxLength={4} placeholder="New PIN"
+            value={next} onChange={e => setNext(e.target.value.replace(/\D/g, ""))} />
+          <input className="fi" type="password" inputMode="numeric" maxLength={4} placeholder="Confirm new PIN"
+            value={confirm} onChange={e => setConfirm(e.target.value.replace(/\D/g, ""))} />
+          <div style={{ display: "flex", gap: 8 }}>
+            <button className="btn btn-gh" style={{ flex: 1 }} disabled={saving} onClick={reset}>Cancel</button>
+            <button className="btn btn-g" style={{ flex: 1 }} disabled={saving} onClick={savePin}>
+              {saving ? "Saving…" : "Save"}
+            </button>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
@@ -1276,7 +1320,7 @@ export default function App() {
           {tab === "pick" && <PickTab competition={activeCompetition} openRound={openRound} fixtures={fixtures} myPlayer={myPlayer} myPick={myPick} user={user} showToast={showToast} />}
           {tab === "round" && <RoundTab competition={activeCompetition} round={currentRound} players={players} picks={picks} members={members} />}
           {tab === "grid" && <GridTab competition={activeCompetition} rounds={rounds} players={players} members={members} />}
-          {tab === "account" && <AccountTab user={user} setUser={setUser} />}
+          {tab === "account" && <AccountTab user={user} members={members} setUser={setUser} showToast={showToast} />}
           {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} players={players} showToast={showToast} />}
         </div>
         {toast && <div className="toast">{toast}</div>}
