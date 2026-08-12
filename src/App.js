@@ -324,10 +324,10 @@ function outcomeBadge(outcome) {
   return <span className="badge b-player">pending</span>;
 }
 
-function RoundTab({ competition, round, players, picks, members }) {
+function RoundTab({ competition, round, players, picks, members, isAdmin }) {
   if (!competition) return <EmptyState title="No competition running" sub="Ask the Admin to start one." />;
   if (!round) return <EmptyState title="No rounds yet" sub="Check back once the Admin imports the first round." />;
-  if (round.status === "open" || round.status === "pending") {
+  if (!isAdmin && (round.status === "open" || round.status === "pending")) {
     return <EmptyState icon="🔒" title="Picks are hidden" sub="Everyone's pick for this round will show here once submissions close." />;
   }
 
@@ -366,7 +366,7 @@ function RoundTab({ competition, round, players, picks, members }) {
 // wired to real-time listeners like everything else -- it's a look-back
 // view, not something that needs millisecond sync, so it's a plain fetch
 // per round that re-runs whenever the round list changes.
-function GridTab({ competition, rounds, players, members }) {
+function GridTab({ competition, rounds, players, members, isAdmin }) {
   const [picksByRound, setPicksByRound] = useState({});
   const [loadingGrid, setLoadingGrid] = useState(false);
   const roundIds = rounds.map(r => r.id).join(",");
@@ -415,6 +415,12 @@ function GridTab({ competition, rounds, players, members }) {
                     <tr key={p.id}>
                       <td className="gname">{nameFor(p.id)}</td>
                       {rounds.map(r => {
+                        // Picks stay anonymous to everyone but the Admin
+                        // until the Admin closes the round -- same rule as
+                        // the Round tab, just applied per-column here since
+                        // this view spans every round, not just the current one.
+                        const hidden = !isAdmin && (r.status === "open" || r.status === "pending");
+                        if (hidden) return <td key={r.id} className="grid-pending">🔒</td>;
                         const pick = picksByRound[r.id]?.[p.id];
                         return (
                           <td key={r.id} className={pick ? cellClass(pick.outcome) : "grid-pending"}>
@@ -1318,8 +1324,8 @@ export default function App() {
         <div className="content">
           {tab === "standings" && <StandingsTab competition={displayCompetition} players={players} members={members} />}
           {tab === "pick" && <PickTab competition={activeCompetition} openRound={openRound} fixtures={fixtures} myPlayer={myPlayer} myPick={myPick} user={user} showToast={showToast} />}
-          {tab === "round" && <RoundTab competition={activeCompetition} round={currentRound} players={players} picks={picks} members={members} />}
-          {tab === "grid" && <GridTab competition={activeCompetition} rounds={rounds} players={players} members={members} />}
+          {tab === "round" && <RoundTab competition={activeCompetition} round={currentRound} players={players} picks={picks} members={members} isAdmin={user.role === "admin"} />}
+          {tab === "grid" && <GridTab competition={activeCompetition} rounds={rounds} players={players} members={members} isAdmin={user.role === "admin"} />}
           {tab === "account" && <AccountTab user={user} members={members} setUser={setUser} showToast={showToast} />}
           {tab === "admin" && user.role === "admin" && <AdminTab members={members} competitions={competitions} activeCompetition={activeCompetition} rounds={rounds} players={players} showToast={showToast} />}
         </div>
