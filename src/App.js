@@ -440,9 +440,19 @@ function GridTab({ competition, rounds, players, members, isAdmin }) {
 }
 
 // ─── ROUNDS CARD (Admin) ────────────────────────────────────────────
+// Always renders in UK time (Europe/London), regardless of the viewer's
+// own device time zone -- otherwise a player abroad would see a kickoff
+// time silently converted to their local zone with no indication it had
+// been, which is exactly how you end up missing a deadline. Europe/London
+// (rather than a fixed UTC/BST offset) correctly handles the GMT<->BST
+// switch across the season on its own.
 function fmtDeadline(iso) {
   if (!iso) return "";
-  return new Date(iso).toLocaleString("en-GB", { weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit" });
+  const formatted = new Date(iso).toLocaleString("en-GB", {
+    weekday: "short", day: "numeric", month: "short", hour: "2-digit", minute: "2-digit",
+    timeZone: "Europe/London",
+  });
+  return `${formatted} UK`;
 }
 
 // Reverses a settled round: pure Firestore reads/writes, no external API,
@@ -902,7 +912,7 @@ function ResolutionCard({ competition, members, players, showToast }) {
     setBusy(true);
     try {
       await setDoc(doc(db, `competitions/${competition.id}`), { status: "completed", needsResolution: false }, { merge: true });
-      const newName = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric" });
+      const newName = new Date().toLocaleDateString("en-GB", { day: "numeric", month: "long", year: "numeric", timeZone: "Europe/London" });
       await startCompetition(newName, members, pot);
       showToast(`Rolled over — £${pot} carries into "${newName}"`);
     } finally {
