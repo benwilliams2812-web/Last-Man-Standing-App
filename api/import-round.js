@@ -15,7 +15,7 @@
 
 const { initializeApp, getApps } = require("firebase/app");
 const {
-  getFirestore, collection, doc, setDoc, getDocs, serverTimestamp,
+  getFirestore, collection, doc, setDoc, getDoc, getDocs, serverTimestamp,
 } = require("firebase/firestore");
 
 const firebaseConfig = {
@@ -82,14 +82,19 @@ module.exports = async function handler(req, res) {
     const roundId = `round-${matchday}`;
     const roundRef = doc(db, `competitions/${competitionId}/rounds/${roundId}`);
 
+    // Re-importing (e.g. to pick up a rescheduled kickoff) must not disturb
+    // a round that's already open/closed/settled -- only a brand-new round
+    // gets seeded with "pending" status and a createdAt.
+    const existingRoundSnap = await getDoc(roundRef);
+    const isNewRound = !existingRoundSnap.exists();
+
     const kickoffs = matches.map(m => m.utcDate).sort();
 
     await setDoc(roundRef, {
       roundNumber: matchday,
       matchday,
-      status: "pending",
       deadline: kickoffs[0],
-      createdAt: serverTimestamp(),
+      ...(isNewRound ? { status: "pending", createdAt: serverTimestamp() } : {}),
     }, { merge: true });
 
     const fixturesCol = collection(db, `competitions/${competitionId}/rounds/${roundId}/fixtures`);

@@ -260,12 +260,18 @@ function PickTab({ competition, openRound, fixtures, myPlayer, myPick, user, sho
   const submit = async () => {
     const opt = options.find(o => o.key === selectedKey);
     if (!opt) { showToast("Pick a team first"); return; }
+    // Re-check right before writing, not just at render time -- teamsUsed
+    // could have changed (e.g. an Admin amend) in the moments between
+    // opening this dropdown and hitting Submit.
+    if (teamsUsed.has(opt.team)) { showToast(`${opt.team} is already used — pick another team`); return; }
     setSaving(true);
     try {
       await setDoc(doc(db, `competitions/${competition.id}/rounds/${openRound.id}/picks/${user.id}`), {
         team: opt.team, fixtureId: opt.fixtureId, outcome: "pending", submittedAt: serverTimestamp(),
       });
       showToast("Pick submitted");
+    } catch (e) {
+      showToast(`Couldn't save your pick — ${e.message}. Please try again.`);
     } finally {
       setSaving(false);
     }
@@ -369,20 +375,28 @@ function RoundTab({ competition, round, players, picks, members, isAdmin }) {
 function GridTab({ competition, rounds, players, members, isAdmin }) {
   const [picksByRound, setPicksByRound] = useState({});
   const [loadingGrid, setLoadingGrid] = useState(false);
+  const [gridError, setGridError] = useState(null);
   const roundIds = rounds.map(r => r.id).join(",");
 
   useEffect(() => {
     if (!competition || rounds.length === 0) { setPicksByRound({}); return; }
     let cancelled = false;
     setLoadingGrid(true);
+    setGridError(null);
     (async () => {
-      const entries = await Promise.all(rounds.map(async r => {
-        const snap = await getDocs(collection(db, `competitions/${competition.id}/rounds/${r.id}/picks`));
-        const map = {};
-        snap.docs.forEach(d => { map[d.id] = d.data(); });
-        return [r.id, map];
-      }));
-      if (!cancelled) { setPicksByRound(Object.fromEntries(entries)); setLoadingGrid(false); }
+      try {
+        const entries = await Promise.all(rounds.map(async r => {
+          const snap = await getDocs(collection(db, `competitions/${competition.id}/rounds/${r.id}/picks`));
+          const map = {};
+          snap.docs.forEach(d => { map[d.id] = d.data(); });
+          return [r.id, map];
+        }));
+        if (!cancelled) setPicksByRound(Object.fromEntries(entries));
+      } catch (e) {
+        if (!cancelled) setGridError(e.message);
+      } finally {
+        if (!cancelled) setLoadingGrid(false);
+      }
     })();
     return () => { cancelled = true; };
   }, [competition?.id, roundIds]);
@@ -390,6 +404,7 @@ function GridTab({ competition, rounds, players, members, isAdmin }) {
   if (!competition) return <EmptyState title="No competition running" sub="Ask the Admin to start one." />;
   if (rounds.length === 0) return <EmptyState title="No rounds yet" sub="Check back once the Admin imports the first round." />;
   if (loadingGrid) return <EmptyState icon="⏳" title="Loading grid…" sub="" />;
+  if (gridError) return <EmptyState icon="⚠️" title="Couldn't load the grid" sub={`${gridError} — pull to refresh or try again shortly.`} />;
 
   const activePlayers = players.filter(p => p.active && !p.suspended);
   const nameFor = (id) => members.find(m => m.id === id)?.name || "Unknown";
@@ -469,11 +484,13 @@ async function undoRound(competitionId, round) {
     const pick = pickDoc.data();
     if (pick.outcome === "pending") continue;
 
-    batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/picks/${pickDoc.id}`), { outcome: "pending" }, { merge: true });
-
     const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
     const playerSnap = await getDoc(playerRef);
-    const player = playerSnap.data() || {};
+    if (!playerSnap.exists()) continue; // member was removed from the roster -- nothing to restore
+
+    batch.set(doc(db, `competitions/${competitionId}/rounds/${round.id}/picks/${pickDoc.id}`), { outcome: "pending" }, { merge: true });
+
+    const player = playerSnap.data();
     const teamsUsed = (player.teamsUsed || []).filter(t => t !== pick.team);
     batch.set(playerRef, { teamsUsed, alive: true }, { merge: true });
   }
@@ -506,7 +523,8 @@ async function amendFixture(competitionId, round, fixture, newResult) {
     if (pick.outcome === "pending") continue;
     const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
     const playerSnap = await getDoc(playerRef);
-    const player = playerSnap.data() || {};
+    if (!playerSnap.exists()) continue; // member was removed from the roster
+    const player = playerSnap.data();
     batch.set(playerRef, { teamsUsed: (player.teamsUsed || []).filter(t => t !== pick.team), alive: true }, { merge: true });
   }
 
@@ -523,18 +541,31 @@ async function amendFixture(competitionId, round, fixture, newResult) {
 
     const playerRef = doc(db, `competitions/${competitionId}/players/${pickDoc.id}`);
     const playerSnap = await getDoc(playerRef);
-    const player = playerSnap.data() || {};
+    if (!playerSnap.exists()) continue; // member was removed from the roster
+    const player = playerSnap.data();
     const teamsUsed = new Set(player.teamsUsed || []);
     teamsUsed.add(pick.team);
     batch.set(playerRef, { teamsUsed: [...teamsUsed], alive: won }, { merge: true });
   }
 
+  // Re-check end-of-competition status, but only once every fixture in the
+  // round has a result -- same gate settle-round.js uses. Checked from a
+  // fresh read taken before this batch commits, then folded into the same
+  // commit so the round's status and the competition's resolution state
+  // land atomically together.
+  const fixturesSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`));
+  const allFinished = fixturesSnap.docs
+    .map(d => (d.id === fixture.id ? newResult : d.data().result))
+    .every(r => r != null);
+
+  const roundRef = doc(db, `competitions/${competitionId}/rounds/${round.id}`);
+  batch.set(roundRef, {
+    status: allFinished ? "settled" : round.status,
+    settledAt: allFinished ? new Date().toISOString() : null,
+  }, { merge: true });
+
   await batch.commit();
 
-  // Re-check end-of-competition status, but only once every fixture in the
-  // round has a result -- same gate settle-round.js uses.
-  const fixturesSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/fixtures`));
-  const allFinished = fixturesSnap.docs.every(d => d.data().result != null);
   if (!allFinished) return;
 
   const playersSnap = await getDocs(collection(db, `competitions/${competitionId}/players`));
@@ -544,8 +575,13 @@ async function amendFixture(competitionId, round, fixture, newResult) {
   if (alivePlayers.length === 1) {
     await setDoc(doc(db, `competitions/${competitionId}`), { status: "completed", winner: alivePlayers[0].id, needsResolution: false }, { merge: true });
   } else if (alivePlayers.length === 0) {
+    // Candidates are whoever's pick for THIS round says "eliminated" --
+    // not every active player ever, which would wrongly include people
+    // eliminated in earlier rounds and hand them a share of the pot.
+    const allPicksSnap = await getDocs(collection(db, `competitions/${competitionId}/rounds/${round.id}/picks`));
+    const roundEliminatedIds = allPicksSnap.docs.filter(d => d.data().outcome === "eliminated").map(d => d.id);
     await setDoc(doc(db, `competitions/${competitionId}`), {
-      needsResolution: true, resolutionReason: "all-eliminated", resolutionCandidates: activePlayers.map(p => p.id),
+      needsResolution: true, resolutionReason: "all-eliminated", resolutionCandidates: roundEliminatedIds,
     }, { merge: true });
   } else if (round.matchday >= LAST_MATCHDAY) {
     await setDoc(doc(db, `competitions/${competitionId}`), {
@@ -656,6 +692,7 @@ async function autoAssignMissedPicks(competitionId, round) {
 function RoundsCard({ competition, rounds, showToast }) {
   const [importing, setImporting] = useState(false);
   const [settlingId, setSettlingId] = useState(null);
+  const [closingId, setClosingId] = useState(null);
   if (!competition) return null;
 
   const nextMatchday = (rounds[rounds.length - 1]?.matchday || 0) + 1;
@@ -680,9 +717,17 @@ function RoundsCard({ competition, rounds, showToast }) {
 
   const setStatus = async (round, status) => {
     if (status === "closed") {
-      const assigned = await autoAssignMissedPicks(competition.id, round);
-      await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
-      showToast(assigned > 0 ? `Round ${round.roundNumber} closed — ${assigned} random pick${assigned > 1 ? "s" : ""} auto-assigned` : `Round ${round.roundNumber} closed`);
+      if (closingId === round.id) return; // already closing -- ignore a double-tap
+      setClosingId(round.id);
+      try {
+        const assigned = await autoAssignMissedPicks(competition.id, round);
+        await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
+        showToast(assigned > 0 ? `Round ${round.roundNumber} closed — ${assigned} random pick${assigned > 1 ? "s" : ""} auto-assigned` : `Round ${round.roundNumber} closed`);
+      } catch (e) {
+        showToast(`Couldn't close the round — ${e.message}`);
+      } finally {
+        setClosingId(null);
+      }
       return;
     }
     await setDoc(doc(db, `competitions/${competition.id}/rounds/${round.id}`), { status }, { merge: true });
@@ -733,7 +778,9 @@ function RoundsCard({ competition, rounds, showToast }) {
                 {r.status !== "open" && r.status !== "closed" && r.status !== "settled" &&
                   <button className="btn btn-sm btn-g" onClick={() => setStatus(r, "open")}>Open</button>}
                 {r.status === "open" &&
-                  <button className="btn btn-sm btn-d" onClick={() => setStatus(r, "closed")}>Close</button>}
+                  <button className="btn btn-sm btn-d" disabled={closingId === r.id} onClick={() => setStatus(r, "closed")}>
+                    {closingId === r.id ? "Closing…" : "Close"}
+                  </button>}
                 {r.status === "closed" &&
                   <button className="btn btn-sm btn-g" disabled={settlingId === r.id} onClick={() => settleRound(r)}>
                     {settlingId === r.id ? "Settling…" : "Settle Results"}

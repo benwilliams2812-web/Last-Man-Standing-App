@@ -133,7 +133,9 @@ module.exports = async function handler(req, res) {
 
       batch.set(doc(db, `competitions/${competitionId}/rounds/${roundId}/picks/${pickDoc.id}`), { outcome }, { merge: true });
 
-      const player = playersById.get(pickDoc.id) || {};
+      const player = playersById.get(pickDoc.id);
+      if (!player) continue; // member was removed from the roster -- nothing to settle for them
+
       const teamsUsed = new Set(player.teamsUsed || []);
       teamsUsed.add(pick.team);
       batch.set(doc(db, `competitions/${competitionId}/players/${pickDoc.id}`), {
@@ -157,10 +159,13 @@ module.exports = async function handler(req, res) {
     if (allFixturesFinished) {
       // Re-derive alive active players from what we just wrote, rather than
       // re-querying — playersById + this round's win/loss outcomes fully
-      // determine current alive status for anyone who had a pick.
+      // determine current alive status for anyone who had a pick. Critically,
+      // this must also exclude anyone already eliminated in an EARLIER round
+      // (playersById.alive reflects state from before this round's writes) --
+      // active/suspended alone say nothing about whether they're still in it.
       const activePlayers = playersSnap.docs
         .map(d => ({ id: d.id, ...playersById.get(d.id) }))
-        .filter(p => p.active && !p.suspended);
+        .filter(p => p.active && !p.suspended && p.alive !== false);
       const aliveIds = new Set(activePlayers.map(p => p.id).filter(id => !eliminatedIds.includes(id)));
       const aliveCount = aliveIds.size;
 
